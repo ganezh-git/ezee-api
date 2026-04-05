@@ -4,7 +4,7 @@ import jwt, { SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
 import { db } from '../../config/database';
 import { environment } from '../../config/environment';
-import { AuthPayload } from '../../middleware/authenticate';
+import { AuthPayload, authenticate } from '../../middleware/authenticate';
 import { RowDataPacket } from 'mysql2';
 
 const router = Router();
@@ -332,5 +332,77 @@ async function migrateLegacyUser(legacyUser: LegacyUserRow, plainPassword: strin
 
   return newUser[0];
 }
+
+// POST /api/auth/change-password (self — any logged-in user)
+router.post('/change-password', authenticate, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: 'Current password and new password are required' }); return;
+    }
+    if (newPassword.length < 6) {
+      res.status(400).json({ error: 'New password must be at least 6 characters' }); return;
+    }
+
+    const [users] = await db.portal().query<UserRow[]>('SELECT * FROM users WHERE id = ?', [userId]);
+    if (!users.length) { res.status(404).json({ error: 'User not found' }); return; }
+
+    const match = await bcrypt.compare(currentPassword, users[0].password);
+    if (!match) { res.status(401).json({ error: 'Current password is incorrect' }); return; }
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await db.portal().query('UPDATE users SET password = ? WHERE id = ?', [hashed, userId]);
+    res.json({ message: 'Password changed successfully' });
+  } catch (err: any) {
+    console.error('Change password error:', err);
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
+// GET /api/auth/profile (self)
+router.get('/profile', authenticate, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+
+    const [users] = await db.portal().query<UserRow[]>(
+      'SELECT id, username, full_name, email, department, designation, role, user_type, company_id, location_id, last_login, created_at FROM users WHERE id = ?',
+      [userId]
+    );
+    if (!users.length) { res.status(404).json({ error: 'User not found' }); return; }
+
+    const user = users[0];
+    res.json({
+      id: user.id, username: user.username, fullName: user.full_name,
+      email: user.email, department: user.department, designation: user.designation,
+      role: user.role, userType: user.user_type, companyId: user.company_id,
+      locationId: user.location_id, lastLogin: user.last_login, createdAt: user.created_at,
+    });
+  } catch (err: any) {
+    console.error('Profile error:', err);
+    res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// PUT /api/auth/profile (update own profile)
+router.put('/profile', authenticate, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+
+    const { fullName, email, department, designation } = req.body;
+    await db.portal().query(
+      'UPDATE users SET full_name = ?, email = ?, department = ?, designation = ? WHERE id = ?',
+      [fullName, email, department, designation, userId]
+    );
+    res.json({ message: 'Profile updated successfully' });
+  } catch (err: any) {
+    console.error('Update profile error:', err);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
 
 export default router;
