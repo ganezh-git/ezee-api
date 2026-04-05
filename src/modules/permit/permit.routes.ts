@@ -802,4 +802,81 @@ router.get('/my-permits', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /analytics ────────────────────────────────────────────
+router.get('/analytics', async (_req: Request, res: Response) => {
+  try {
+    const unionAllFrom = PERMIT_TABLES.map(t =>
+      `SELECT '${t}' as _table, id, rdate, estime, emer, st2, secname FROM \`${t}\``
+    ).join(' UNION ALL ');
+
+    // Status counts, type counts, mode counts, department breakdown
+    const [statusRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT st2 as status, COUNT(*) as count FROM (${unionAllFrom}) AS c GROUP BY st2 ORDER BY count DESC`
+    );
+    const [typeRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT _table as type, COUNT(*) as count FROM (${unionAllFrom}) AS c GROUP BY _table ORDER BY count DESC`
+    );
+    const [modeRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT emer as mode, COUNT(*) as count FROM (${unionAllFrom}) AS c GROUP BY emer ORDER BY count DESC`
+    );
+    const [deptRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT secname as name, COUNT(*) as count FROM (${unionAllFrom}) AS c WHERE secname IS NOT NULL AND secname != '' GROUP BY secname ORDER BY count DESC LIMIT 10`
+    );
+
+    // Daily counts (last 30 days) — use estime (expected start / issue date)
+    const [dailyRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT DATE(estime) as date, COUNT(*) as count,
+        SUM(CASE WHEN st2 IN ('Permit Returned','Locked') THEN 1 ELSE 0 END) as closed
+       FROM (${unionAllFrom}) AS c
+       WHERE estime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND estime IS NOT NULL AND estime != ''
+       GROUP BY DATE(estime) ORDER BY date`
+    );
+
+    // Monthly trend (last 6 months)
+    const [monthlyRows] = await db.permit().query<RowDataPacket[]>(
+      `SELECT DATE_FORMAT(estime, '%Y-%m') as month,
+        COUNT(*) as count,
+        SUM(CASE WHEN st2 IN ('Permit Returned','Locked') THEN 1 ELSE 0 END) as closed
+       FROM (${unionAllFrom}) AS c
+       WHERE estime >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) AND estime IS NOT NULL AND estime != ''
+       GROUP BY DATE_FORMAT(estime, '%Y-%m') ORDER BY month`
+    );
+
+    // Format type counts with labels
+    const typeCounts = (typeRows as any[]).map(r => ({
+      type: r.type,
+      label: PERMIT_TYPE_LABELS[r.type] || r.type,
+      short_label: (PERMIT_TYPE_LABELS[r.type] || r.type).split(' ')[0],
+      icon: PERMIT_TYPE_ICONS[r.type] || 'assignment',
+      color: PERMIT_TYPE_COLORS[r.type] || '#64748b',
+      count: r.count,
+    }));
+
+    // Format monthly trend with labels
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthlyTrend = (monthlyRows as any[]).map(r => ({
+      month: r.month,
+      label: monthNames[parseInt(r.month.split('-')[1]) - 1] + ' ' + r.month.split('-')[0].slice(2),
+      count: r.count,
+      closed: r.closed || 0,
+    }));
+
+    res.json({
+      statusCounts: statusRows,
+      typeCounts,
+      modeCounts: (modeRows as any[]).map(r => ({
+        mode: r.mode === 'N' ? 'Normal' : r.mode === 'B' ? 'Breakdown' : r.mode === 'U' ? 'Unplanned' : r.mode,
+        modeCode: r.mode,
+        count: r.count,
+      })),
+      departmentBreakdown: deptRows,
+      dailyCounts: dailyRows,
+      monthlyTrend,
+    });
+  } catch (err: any) {
+    console.error('Analytics error:', err);
+    res.status(500).json({ error: 'Failed to load analytics' });
+  }
+});
+
 export default router;
