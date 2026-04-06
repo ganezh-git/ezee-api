@@ -703,4 +703,196 @@ router.post('/settings', async (req: Request, res: Response) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// SAFETY ASSETS
+// ═══════════════════════════════════════════════════════════════
+router.get('/assets', async (req: Request, res: Response) => {
+  try {
+    const { search, category, inspection_status, condition_status, department, page = '1', limit = '20' } = req.query;
+    let where = '1=1'; const params: any[] = [];
+    if (search) { where += ' AND (asset_name LIKE ? OR asset_no LIKE ? OR serial_no LIKE ? OR location LIKE ? OR make LIKE ? OR model LIKE ?)'; params.push(`%${search}%`,`%${search}%`,`%${search}%`,`%${search}%`,`%${search}%`,`%${search}%`); }
+    if (category) { where += ' AND asset_category = ?'; params.push(category); }
+    if (inspection_status) { where += ' AND inspection_status = ?'; params.push(inspection_status); }
+    if (condition_status) { where += ' AND condition_status = ?'; params.push(condition_status); }
+    if (department) { where += ' AND department = ?'; params.push(department); }
+    const pg = Math.max(1, parseInt(page as string));
+    const lm = Math.min(100, parseInt(limit as string));
+    const [countRows] = await pool().execute<RowDataPacket[]>(`SELECT COUNT(*) as total FROM safety_assets WHERE ${where}`, params);
+    const [rows] = await pool().execute<RowDataPacket[]>(
+      `SELECT * FROM safety_assets WHERE ${where} ORDER BY next_inspection_date ASC, asset_name LIMIT ${Number(lm)} OFFSET ${Number((pg - 1) * lm)}`, params
+    );
+    // Summary stats
+    const [stats] = await pool().execute<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) as total,
+         SUM(inspection_status = 'valid') as valid,
+         SUM(inspection_status = 'due') as due,
+         SUM(inspection_status = 'overdue') as overdue,
+         SUM(inspection_status = 'failed') as failed,
+         SUM(condition_status = 'condemned') as condemned,
+         COUNT(DISTINCT asset_category) as categories
+       FROM safety_assets WHERE is_active = 1`
+    );
+    res.json({ assets: rows, total: countRows[0].total, page: pg, limit: lm, stats: stats[0] });
+  } catch (err: any) {
+    console.error('Get assets error:', err);
+    res.status(500).json({ error: 'Failed to load assets' });
+  }
+});
+
+router.get('/assets/:id', async (req: Request, res: Response) => {
+  try {
+    const [rows] = await pool().execute<RowDataPacket[]>('SELECT * FROM safety_assets WHERE id = ?', [req.params.id]);
+    if (!rows.length) { res.status(404).json({ error: 'Asset not found' }); return; }
+    // Include inspection history
+    const [inspections] = await pool().execute<RowDataPacket[]>(
+      'SELECT * FROM asset_inspections WHERE asset_id = ? ORDER BY inspection_date DESC', [req.params.id]
+    );
+    res.json({ ...rows[0], inspections });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to load asset' });
+  }
+});
+
+router.post('/assets', async (req: Request, res: Response) => {
+  try {
+    const d = req.body;
+    const assetNo = await generateNo('SA', 'safety_assets', 'asset_no');
+    const [result] = await pool().execute<ResultSetHeader>(
+      `INSERT INTO safety_assets (asset_no, asset_name, asset_category, make, model, serial_no,
+        purchase_date, warranty_expiry, department, location, assigned_to, rated_capacity,
+        specifications, last_inspection_date, next_inspection_date, inspection_frequency_days,
+        inspection_status, condition_status, is_active, photo_path, qr_code, remarks, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [assetNo, d.asset_name, d.asset_category || 'other', d.make||null, d.model||null, d.serial_no||null,
+        d.purchase_date||null, d.warranty_expiry||null, d.department||null, d.location||null,
+        d.assigned_to||null, d.rated_capacity||null, d.specifications||null,
+        d.last_inspection_date||null, d.next_inspection_date||null, d.inspection_frequency_days||90,
+        d.inspection_status||'not_inspected', d.condition_status||'good', d.is_active??1,
+        d.photo_path||null, d.qr_code||null, d.remarks||null, req.user?.sub||0]
+    );
+    res.json({ id: result.insertId, asset_no: assetNo, message: 'Asset registered' });
+  } catch (err: any) {
+    console.error('Add asset error:', err);
+    res.status(500).json({ error: 'Failed to add asset' });
+  }
+});
+
+router.put('/assets/:id', async (req: Request, res: Response) => {
+  try {
+    const d = req.body;
+    await pool().execute(
+      `UPDATE safety_assets SET asset_name=?, asset_category=?, make=?, model=?, serial_no=?,
+        purchase_date=?, warranty_expiry=?, department=?, location=?, assigned_to=?, rated_capacity=?,
+        specifications=?, last_inspection_date=?, next_inspection_date=?, inspection_frequency_days=?,
+        inspection_status=?, condition_status=?, is_active=?, photo_path=?, qr_code=?, remarks=?
+       WHERE id = ?`,
+      [d.asset_name, d.asset_category, d.make||null, d.model||null, d.serial_no||null,
+        d.purchase_date||null, d.warranty_expiry||null, d.department||null, d.location||null,
+        d.assigned_to||null, d.rated_capacity||null, d.specifications||null,
+        d.last_inspection_date||null, d.next_inspection_date||null, d.inspection_frequency_days||90,
+        d.inspection_status||'not_inspected', d.condition_status||'good', d.is_active??1,
+        d.photo_path||null, d.qr_code||null, d.remarks||null, req.params.id]
+    );
+    res.json({ message: 'Asset updated' });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to update asset' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ASSET INSPECTIONS
+// ═══════════════════════════════════════════════════════════════
+router.get('/asset-inspections', async (req: Request, res: Response) => {
+  try {
+    const { search, asset_id, inspection_type, result: inspResult, status, from, to, page = '1', limit = '20' } = req.query;
+    let where = '1=1'; const params: any[] = [];
+    if (search) { where += ' AND (ai.inspection_no LIKE ? OR sa.asset_name LIKE ? OR ai.inspector_name LIKE ? OR ai.findings LIKE ?)'; params.push(`%${search}%`,`%${search}%`,`%${search}%`,`%${search}%`); }
+    if (asset_id) { where += ' AND ai.asset_id = ?'; params.push(asset_id); }
+    if (inspection_type) { where += ' AND ai.inspection_type = ?'; params.push(inspection_type); }
+    if (inspResult) { where += ' AND ai.result = ?'; params.push(inspResult); }
+    if (status) { where += ' AND ai.status = ?'; params.push(status); }
+    if (from) { where += ' AND ai.inspection_date >= ?'; params.push(from); }
+    if (to) { where += ' AND ai.inspection_date <= ?'; params.push(to); }
+    const pg = Math.max(1, parseInt(page as string));
+    const lm = Math.min(100, parseInt(limit as string));
+    const [countRows] = await pool().execute<RowDataPacket[]>(
+      `SELECT COUNT(*) as total FROM asset_inspections ai JOIN safety_assets sa ON sa.id = ai.asset_id WHERE ${where}`, params
+    );
+    const [rows] = await pool().execute<RowDataPacket[]>(
+      `SELECT ai.*, sa.asset_name, sa.asset_no, sa.asset_category, sa.location as asset_location, sa.department as asset_department
+       FROM asset_inspections ai JOIN safety_assets sa ON sa.id = ai.asset_id
+       WHERE ${where} ORDER BY ai.inspection_date DESC LIMIT ${Number(lm)} OFFSET ${Number((pg - 1) * lm)}`, params
+    );
+    res.json({ inspections: rows, total: countRows[0].total, page: pg, limit: lm });
+  } catch (err: any) {
+    console.error('Get asset inspections error:', err);
+    res.status(500).json({ error: 'Failed to load asset inspections' });
+  }
+});
+
+router.post('/asset-inspections', async (req: Request, res: Response) => {
+  try {
+    const d = req.body;
+    const inspNo = await generateNo('AI', 'asset_inspections', 'inspection_no');
+    const [result] = await pool().execute<ResultSetHeader>(
+      `INSERT INTO asset_inspections (inspection_no, asset_id, inspection_type, inspection_date, next_due_date,
+        inspector_name, inspector_company, inspector_certification, checklist_items, findings,
+        defects_found, critical_defects, corrective_actions, result, overall_score,
+        certificate_no, certificate_expiry, status, remarks, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [inspNo, d.asset_id, d.inspection_type||'periodic', d.inspection_date, d.next_due_date||null,
+        d.inspector_name||null, d.inspector_company||null, d.inspector_certification||null,
+        d.checklist_items||null, d.findings||null, d.defects_found||0, d.critical_defects||0,
+        d.corrective_actions||null, d.result||'pass', d.overall_score||null,
+        d.certificate_no||null, d.certificate_expiry||null, d.status||'completed',
+        d.remarks||null, req.user?.sub||0]
+    );
+    // Update asset's inspection dates
+    if (d.status === 'completed' || !d.status) {
+      await pool().execute(
+        `UPDATE safety_assets SET last_inspection_date = ?, next_inspection_date = ?,
+          inspection_status = CASE WHEN ? IN ('pass','conditional') THEN 'valid' ELSE 'failed' END
+         WHERE id = ?`,
+        [d.inspection_date, d.next_due_date || null, d.result || 'pass', d.asset_id]
+      );
+    }
+    res.json({ id: result.insertId, inspection_no: inspNo, message: 'Inspection recorded' });
+  } catch (err: any) {
+    console.error('Add asset inspection error:', err);
+    res.status(500).json({ error: 'Failed to add inspection' });
+  }
+});
+
+router.put('/asset-inspections/:id', async (req: Request, res: Response) => {
+  try {
+    const d = req.body;
+    await pool().execute(
+      `UPDATE asset_inspections SET inspection_type=?, inspection_date=?, next_due_date=?,
+        inspector_name=?, inspector_company=?, inspector_certification=?, checklist_items=?,
+        findings=?, defects_found=?, critical_defects=?, corrective_actions=?, result=?,
+        overall_score=?, certificate_no=?, certificate_expiry=?, status=?, remarks=?
+       WHERE id = ?`,
+      [d.inspection_type, d.inspection_date, d.next_due_date||null,
+        d.inspector_name||null, d.inspector_company||null, d.inspector_certification||null,
+        d.checklist_items||null, d.findings||null, d.defects_found||0, d.critical_defects||0,
+        d.corrective_actions||null, d.result||'pass', d.overall_score||null,
+        d.certificate_no||null, d.certificate_expiry||null, d.status||'completed',
+        d.remarks||null, req.params.id]
+    );
+    // Update asset if completed
+    if (d.status === 'completed' && d.asset_id) {
+      await pool().execute(
+        `UPDATE safety_assets SET last_inspection_date = ?, next_inspection_date = ?,
+          inspection_status = CASE WHEN ? IN ('pass','conditional') THEN 'valid' ELSE 'failed' END
+         WHERE id = ?`,
+        [d.inspection_date, d.next_due_date || null, d.result || 'pass', d.asset_id]
+      );
+    }
+    res.json({ message: 'Inspection updated' });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to update inspection' });
+  }
+});
+
 export default router;
