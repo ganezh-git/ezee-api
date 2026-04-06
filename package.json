@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "nodemon --exec ts-node src/server.ts",
-    "build": "tsc",
+    "build": "esbuild src/server.ts --bundle --platform=node --outfile=dist/server.js --packages=external --format=cjs",
     "start": "node dist/server.js",
     "test": "echo \"Tests will be added\" && exit 0"
   },
