@@ -337,6 +337,54 @@ router.get('/audit-log', async (req: Request, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// LOGIN LOG (User login history with IP location)
+// ═══════════════════════════════════════════════════════════════
+router.get('/login-log', async (req: Request, res: Response) => {
+  try {
+    const { search, user_id, action, success, page = '1', limit = '50', from, to } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+    let where = 'WHERE 1=1';
+    const params: any[] = [];
+
+    if (search) {
+      where += ' AND (l.username LIKE ? OR l.full_name LIKE ? OR l.ip_address LIKE ? OR l.city LIKE ? OR l.country LIKE ?)';
+      const pat = `%${search}%`;
+      params.push(pat, pat, pat, pat, pat);
+    }
+    if (user_id) { where += ' AND l.user_id = ?'; params.push(user_id); }
+    if (action) { where += ' AND l.action = ?'; params.push(action); }
+    if (success !== undefined && success !== '') { where += ' AND l.success = ?'; params.push(success); }
+    if (from) { where += ' AND l.created_at >= ?'; params.push(from); }
+    if (to) { where += ' AND l.created_at <= ? '; params.push(to + ' 23:59:59'); }
+
+    const [[{ cnt: total }]] = await db.portal().query<CountRow[]>(
+      `SELECT COUNT(*) as cnt FROM login_log l ${where}`, params
+    );
+
+    const [logs] = await db.portal().query<RowDataPacket[]>(
+      `SELECT l.* FROM login_log l ${where} ORDER BY l.created_at DESC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), offset]
+    );
+
+    // Stats summary
+    const [[stats]] = await db.portal().query<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) as total_logins,
+         SUM(success = 1 AND action = 'login') as successful,
+         SUM(success = 0) as failed,
+         COUNT(DISTINCT ip_address) as unique_ips,
+         COUNT(DISTINCT user_id) as unique_users
+       FROM login_log WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
+    );
+
+    res.json({ logs, total, page: Number(page), limit: Number(limit), stats });
+  } catch (err: any) {
+    console.error('Login log error:', err);
+    res.status(500).json({ error: 'Failed to load login log' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 async function logAudit(userId: number, action: string, entityType: string | null, entityId: number | null, details: string, ip?: string) {

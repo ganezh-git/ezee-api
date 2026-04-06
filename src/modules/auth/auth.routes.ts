@@ -76,6 +76,9 @@ router.post('/login', async (req: Request, res: Response) => {
           generateToken(user),
           updateLastLogin(user.id),
         ]);
+        // Log successful login (non-blocking)
+        const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+        logLogin({ user_id: user.id, username: user.username, full_name: user.full_name, action: 'login', ip_address: ip, user_agent: req.headers['user-agent'] || '', login_method: 'portal', success: true });
         res.json({ token, user: sanitizeUser(user) });
         return;
       }
@@ -96,6 +99,8 @@ router.post('/login', async (req: Request, res: Response) => {
           // Auto-migrate: create modern user with bcrypt password
           const migratedUser = await migrateLegacyUser(legacyUser, password);
           const token = await generateToken(migratedUser);
+          const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+          logLogin({ user_id: migratedUser.id, username: migratedUser.username, full_name: migratedUser.full_name, action: 'login', ip_address: ip, user_agent: req.headers['user-agent'] || '', login_method: 'auto_migrate', success: true });
           res.json({
             token,
             user: sanitizeUser(migratedUser),
@@ -106,6 +111,9 @@ router.post('/login', async (req: Request, res: Response) => {
       }
     }
 
+    // Log failed login attempt
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+    logLogin({ user_id: 0, username: username, action: 'failed', ip_address: ip, user_agent: req.headers['user-agent'] || '', success: false, failure_reason: 'Invalid credentials' });
     res.status(401).json({ error: 'Invalid username or password' });
   } catch (err: any) {
     console.error('Login error:', err);
@@ -274,6 +282,40 @@ async function generateToken(user: UserRow): Promise<string> {
 
 async function updateLastLogin(userId: number): Promise<void> {
   await db.portal().query('UPDATE users SET last_login = NOW() WHERE id = ?', [userId]);
+}
+
+// Log login attempt with IP geolocation
+async function logLogin(data: {
+  user_id: number; username: string; full_name?: string;
+  action: string; ip_address: string; user_agent: string;
+  login_method?: string; success: boolean; failure_reason?: string;
+}): Promise<void> {
+  // Geo lookup (non-blocking, best-effort)
+  let city = '', region = '', country = '', isp = '';
+  try {
+    const cleanIp = data.ip_address === '::1' || data.ip_address === '127.0.0.1' ? '' : data.ip_address;
+    if (cleanIp) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const resp = await fetch(`http://ip-api.com/json/${cleanIp}?fields=city,regionName,country,isp`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (resp.ok) {
+        const geo = await resp.json();
+        city = geo.city || ''; region = geo.regionName || '';
+        country = geo.country || ''; isp = geo.isp || '';
+      }
+    } else {
+      city = 'Localhost'; country = 'Local';
+    }
+  } catch { /* geo lookup failed, not critical */ }
+
+  db.portal().execute(
+    `INSERT INTO login_log (user_id, username, full_name, action, ip_address, user_agent, city, region, country, isp, login_method, success, failure_reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [data.user_id, data.username, data.full_name || null, data.action,
+     data.ip_address, data.user_agent, city, region, country, isp,
+     data.login_method || 'portal', data.success ? 1 : 0, data.failure_reason || null]
+  ).catch(() => {});
 }
 
 function sanitizeUser(user: UserRow) {
