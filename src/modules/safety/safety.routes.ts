@@ -109,7 +109,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
       severityBreakdown,
       recentIncidents,
       upcomingAudits: upcomingAuditsList,
-      upcomingTrainings: upcomingTrainingsList,
+      upcomingTrainingsList,
       observationTrend,
     });
   } catch (err: any) {
