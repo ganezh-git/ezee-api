@@ -12,6 +12,7 @@ import permitRoutes from './modules/permit/permit.routes';
 import permitBirlaRoutes from './modules/permit-birla/permit-birla.routes';
 import vehicleRoutes from './modules/vehicle/vehicle.routes';
 import visitorRoutes from './modules/visitor/visitor.routes';
+import libraryRoutes from './modules/library/library.routes';
 
 const app = express();
 
@@ -113,6 +114,7 @@ app.use('/api/permit', authenticate, permitRoutes);
 app.use('/api/permit-birla', authenticate, permitBirlaRoutes);
 app.use('/api/vehicle', authenticate, vehicleRoutes);
 app.use('/api/visitor', authenticate, visitorRoutes);
+app.use('/api/library', authenticate, libraryRoutes);
 
 // Future module routes will be added here:
 // app.use('/api/inventory', authenticate, requireSystemAccess('inventory'), inventoryRoutes);
