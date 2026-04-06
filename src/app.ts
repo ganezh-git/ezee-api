@@ -10,8 +10,13 @@ import authRoutes from './modules/auth/auth.routes';
 import adminRoutes from './modules/admin/admin.routes';
 import permitRoutes from './modules/permit/permit.routes';
 import permitBirlaRoutes from './modules/permit-birla/permit-birla.routes';
+import vehicleRoutes from './modules/vehicle/vehicle.routes';
+import visitorRoutes from './modules/visitor/visitor.routes';
 
 const app = express();
+
+// Disable ETag to prevent 304 responses with stale cached data
+app.set('etag', false);
 
 // Trust proxy (required for Cloud Run / load balancers)
 app.set('trust proxy', 1);
@@ -38,8 +43,15 @@ app.use('/api/auth', rateLimit({
 }));
 
 // Body parsing
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Disable caching for API responses (prevent 304 stale data)
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  next();
+});
 
 // Request timeout - prevent requests from hanging forever
 app.use((req, res, next) => {
@@ -99,6 +111,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', authenticate, authorize('super_admin', 'admin'), adminRoutes);
 app.use('/api/permit', authenticate, permitRoutes);
 app.use('/api/permit-birla', authenticate, permitBirlaRoutes);
+app.use('/api/vehicle', authenticate, vehicleRoutes);
+app.use('/api/visitor', authenticate, visitorRoutes);
 
 // Future module routes will be added here:
 // app.use('/api/inventory', authenticate, requireSystemAccess('inventory'), inventoryRoutes);
